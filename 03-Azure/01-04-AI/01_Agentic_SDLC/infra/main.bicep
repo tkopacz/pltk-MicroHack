@@ -50,25 +50,19 @@ param minReplicas int = 1
 @minValue(1)
 param maxReplicas int = 3
 
-// TODO: The scaffold passes ACR admin credentials into the frontend/api modules
-//       for a quick first deploy. Prefer a user-assigned managed identity with
-//       AcrPull and remove these entirely. Left as params so nothing is baked in.
-@description('ACR admin username (leave empty to switch modules to managed identity).')
-param registryUsername string = ''
-
-@description('ACR admin password (leave empty to switch modules to managed identity).')
-@secure()
-param registryPassword string = ''
+@description('Deploy Container Apps. Set false to bootstrap ACR before the first image build.')
+param deployApps bool = true
 
 // -----------------------------------------------------------------------------
 // Derived names. Registry names must be globally unique and alphanumeric only.
 // -----------------------------------------------------------------------------
 var baseName = '${namePrefix}-${environmentName}'
-var registryName = toLower(replace('${namePrefix}${environmentName}acr', '-', ''))
+var registryName = take(toLower(replace('${namePrefix}${environmentName}${uniqueString(resourceGroup().id)}', '-', '')), 50)
 var logAnalyticsName = '${baseName}-logs'
 var environmentResourceName = '${baseName}-env'
 var apiAppName = '${baseName}-api'
 var frontendAppName = '${baseName}-frontend'
+var imagePullIdentityName = '${baseName}-pull-id'
 
 var commonTags = {
   project: 'octocat-supply'
@@ -80,11 +74,18 @@ var commonTags = {
 // -----------------------------------------------------------------------------
 // Container Registry
 // -----------------------------------------------------------------------------
+resource imagePullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: imagePullIdentityName
+  location: location
+  tags: commonTags
+}
+
 module registry 'modules/registry.bicep' = {
   name: 'registry'
   params: {
     location: location
     registryName: registryName
+    imagePullPrincipalId: imagePullIdentity.properties.principalId
     tags: commonTags
   }
 }
@@ -121,7 +122,7 @@ module environment 'modules/containerapp-env.bicep' = {
 //       own public URL (handy for debugging/tests). Set it to false to make the
 //       api internal-only and reachable solely by the frontend inside the env —
 //       usually the more correct production choice. Pick one deliberately.
-module apiApp 'modules/containerapp.bicep' = {
+module apiApp 'modules/containerapp.bicep' = if (deployApps) {
   name: 'api-app'
   params: {
     location: location
@@ -131,8 +132,7 @@ module apiApp 'modules/containerapp.bicep' = {
     targetPort: 3000
     externalIngress: true
     registryLoginServer: registry.outputs.loginServer
-    registryUsername: registryUsername
-    registryPassword: registryPassword
+    imagePullIdentityResourceId: imagePullIdentity.id
     minReplicas: minReplicas
     maxReplicas: maxReplicas
     tags: commonTags
@@ -147,7 +147,7 @@ module apiApp 'modules/containerapp.bicep' = {
 // -----------------------------------------------------------------------------
 // The API_HOST/API_PORT env vars tell nginx where the api lives. Using the api
 // app name resolves inside the environment for service discovery.
-module frontendApp 'modules/containerapp.bicep' = {
+module frontendApp 'modules/containerapp.bicep' = if (deployApps) {
   name: 'frontend-app'
   params: {
     location: location
@@ -157,8 +157,7 @@ module frontendApp 'modules/containerapp.bicep' = {
     targetPort: 80
     externalIngress: true
     registryLoginServer: registry.outputs.loginServer
-    registryUsername: registryUsername
-    registryPassword: registryPassword
+    imagePullIdentityResourceId: imagePullIdentity.id
     minReplicas: minReplicas
     maxReplicas: maxReplicas
     tags: commonTags
@@ -174,6 +173,10 @@ module frontendApp 'modules/containerapp.bicep' = {
         //       front the api on 443/https externally, adjust API_PORT/PROTOCOL.
         value: '3000'
       }
+      {
+        name: 'API_PROTOCOL'
+        value: 'http'
+      }
       // TODO: The entrypoint also honours API_PROTOCOL (default https). Add it
       //       here if your ingress/scheme requires it.
     ]
@@ -186,8 +189,11 @@ module frontendApp 'modules/containerapp.bicep' = {
 @description('ACR login server — push images here and reference them in the apps.')
 output acrLoginServer string = registry.outputs.loginServer
 
+@description('Name of the Azure Container Registry.')
+output acrName string = registry.outputs.registryName
+
 @description('Public URL of the frontend app.')
-output frontendUrl string = 'https://${frontendApp.outputs.fqdn}'
+output frontendUrl string = deployApps ? 'https://${frontendApp!.outputs.fqdn}' : ''
 
 @description('FQDN of the api app (public only while externalIngress is true).')
-output apiFqdn string = apiApp.outputs.fqdn
+output apiFqdn string = deployApps ? apiApp!.outputs.fqdn : ''

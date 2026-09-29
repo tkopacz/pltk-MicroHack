@@ -1,0 +1,129 @@
+name: Deploy Agentic SDLC to Azure
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/deploy-agentic-sdlc.yml
+      - 03-Azure/01-04-AI/01_Agentic_SDLC/infra/**
+      - 03-Azure/01-04-AI/01_Agentic_SDLC/src/api-ts/**
+      - 03-Azure/01-04-AI/01_Agentic_SDLC/src/database/**
+      - 03-Azure/01-04-AI/01_Agentic_SDLC/src/frontend/**
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: azure-agentic-sdlc
+  cancel-in-progress: false
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  LOCATION: ${{ vars.AZURE_LOCATION }}
+  IMAGE_TAG: ${{ github.sha }}
+  DEPLOYMENT_NAME: octocat-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  deploy:
+    name: Validate and deploy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 03-Azure/01-04-AI/01_Agentic_SDLC
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create resource group
+        run: az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
+
+      - name: Build Bicep
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      - name: Validate bootstrap
+        run: |
+          az deployment group validate \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json deployApps=false \
+            --output none
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json deployApps=false \
+            --no-pretty-print
+
+      - name: Bootstrap infrastructure
+        id: bootstrap
+        run: |
+          ACR_NAME=$(az deployment group create \
+            --name "${DEPLOYMENT_NAME}-bootstrap" \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json deployApps=false \
+            --query properties.outputs.acrName.value \
+            --output tsv)
+          echo "acr-name=$ACR_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build API image in ACR
+        run: |
+          az acr build \
+            --registry "${{ steps.bootstrap.outputs.acr-name }}" \
+            --image "api:$IMAGE_TAG" \
+            --file src/api-ts/Dockerfile \
+            src
+
+      - name: Build frontend image in ACR
+        run: |
+          az acr build \
+            --registry "${{ steps.bootstrap.outputs.acr-name }}" \
+            --image "frontend:$IMAGE_TAG" \
+            src/frontend
+
+      - name: Validate deployment
+        env:
+          ACR_NAME: ${{ steps.bootstrap.outputs.acr-name }}
+        run: |
+          az deployment group validate \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json \
+              deployApps=true \
+              apiImage="$ACR_NAME.azurecr.io/api:$IMAGE_TAG" \
+              frontendImage="$ACR_NAME.azurecr.io/frontend:$IMAGE_TAG" \
+            --output none
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json \
+              deployApps=true \
+              apiImage="$ACR_NAME.azurecr.io/api:$IMAGE_TAG" \
+              frontendImage="$ACR_NAME.azurecr.io/frontend:$IMAGE_TAG" \
+            --no-pretty-print
+
+      - name: Deploy application
+        env:
+          ACR_NAME: ${{ steps.bootstrap.outputs.acr-name }}
+        run: |
+          az deployment group create \
+            --name "$DEPLOYMENT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.parameters.json \
+              deployApps=true \
+              apiImage="$ACR_NAME.azurecr.io/api:$IMAGE_TAG" \
+              frontendImage="$ACR_NAME.azurecr.io/frontend:$IMAGE_TAG" \
+            --query properties.outputs.frontendUrl.value \
+            --output tsv

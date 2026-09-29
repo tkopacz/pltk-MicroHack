@@ -8,9 +8,9 @@
 #   - No Application Administrator / directory write privileges required.
 #   - It can additionally be attached to Azure resources (ACR pull, Key Vault, ...).
 #
-# Creates the identity, grants it Contributor on the target resource group, adds
-# federated credentials for this repo, and pushes the ids into GitHub Actions
-# secrets/variables.
+# Creates the identity, grants it deployment and RBAC permissions on the target
+# resource group, adds federated credentials for this repo, and pushes the ids
+# into GitHub Actions secrets/variables.
 #
 # Prereqs: az login, and (optionally) gh auth login with a token that can write
 # Actions secrets. If the gh write fails the values are printed for manual entry.
@@ -101,13 +101,24 @@ read -r CLIENT_ID PRINCIPAL_ID IDENTITY_RESOURCE_ID <<<"$(az identity show \
 SCOPE="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
 # --assignee-object-id + principal type skips the Graph lookup, which also avoids
 # a race against replication of a freshly created identity.
-az role assignment create \
-  --assignee-object-id "$PRINCIPAL_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role "$ROLE" \
-  --scope "$SCOPE" \
-  -o none 2>/dev/null || true
-echo "✓ $ROLE granted on $SCOPE"
+ensure_role_assignment() {
+  local role="$1"
+  if [[ "$(az role assignment list \
+             --assignee "$PRINCIPAL_ID" \
+             --scope "$SCOPE" \
+             --query "[?roleDefinitionName=='$role'] | length(@)" -o tsv)" == "0" ]]; then
+    az role assignment create \
+      --assignee-object-id "$PRINCIPAL_ID" \
+      --assignee-principal-type ServicePrincipal \
+      --role "$role" \
+      --scope "$SCOPE" \
+      -o none
+  fi
+  echo "✓ $role granted on $SCOPE"
+}
+
+ensure_role_assignment "$ROLE"
+ensure_role_assignment "Role Based Access Control Administrator"
 
 # --- 4. Federated credentials ------------------------------------------------
 add_federated_credential() {
@@ -162,7 +173,7 @@ echo
 if [[ "$gh_write_ok" == "1" ]]; then
   echo "✓ GitHub secrets and variables set"
   echo "Done. AZURE_CLIENT_ID=$CLIENT_ID"
-  echo "Verify with: gh workflow run deploy.yml --repo $REPO"
+  echo "Verify with: gh workflow run deploy-agentic-sdlc.yml --repo $REPO"
 else
   cat <<EOF
 ! Could not write GitHub secrets/variables with the current token.

@@ -16,6 +16,9 @@ param registryName string
 @description('Tags applied to the registry.')
 param tags object = {}
 
+@description('Principal ID of the managed identity allowed to pull images.')
+param imagePullPrincipalId string
+
 // TODO: Decide the SKU. Basic is cheapest and fine for a hackathon; Standard/
 //       Premium add throughput, geo-replication, private endpoints, etc.
 //       Ask Copilot for Well-Architected guidance if unsure.
@@ -30,7 +33,7 @@ param sku string = 'Basic'
 //       admin user DISABLED and grant the Container Apps' identity AcrPull
 //       instead. The scaffold defaults to enabled to keep first-run simple —
 //       flip this to false once you wire up role assignments.
-param adminUserEnabled bool = true
+param adminUserEnabled bool = false
 
 resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
   name: registryName
@@ -43,6 +46,19 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = 
     adminUserEnabled: adminUserEnabled
     // TODO: Consider `publicNetworkAccess: 'Disabled'` + private endpoints for
     //       a hardened setup, and `anonymousPullEnabled: false`.
+  }
+}
+
+resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, imagePullPrincipalId, 'AcrPull')
+  scope: registry
+  properties: {
+    principalId: imagePullPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '7f951dda-4ed3-4680-a7ca-43fe172d538d'
+    )
   }
 }
 

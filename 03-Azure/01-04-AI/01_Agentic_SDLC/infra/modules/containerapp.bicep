@@ -30,6 +30,9 @@ param externalIngress bool = true
 @description('Login server of the ACR the image is pulled from.')
 param registryLoginServer string
 
+@description('Resource ID of the user-assigned identity used to pull images from ACR.')
+param imagePullIdentityResourceId string
+
 @description('Environment variables for the container. Array of { name, value } objects.')
 param env array = []
 
@@ -51,27 +54,16 @@ param maxReplicas int = 3
 param cpu string = '0.5'
 param memory string = '1.0Gi'
 
-// -----------------------------------------------------------------------------
-// Registry authentication
-// -----------------------------------------------------------------------------
-// TODO: This scaffold authenticates to ACR with the admin username/password
-//       passed in as a secret (simplest path to a first deploy). The PREFERRED
-//       approach is a user-assigned managed identity with the AcrPull role and
-//       `identity: '<managed-identity-resource-id>'` on the registry entry — no
-//       secrets at all. Swap this out once you wire up the identity + role.
-@description('ACR admin username (leave empty when using managed identity).')
-param registryUsername string = ''
-
-@description('ACR admin password (leave empty when using managed identity).')
-@secure()
-param registryPassword string = ''
-
-var useAdminCreds = !empty(registryUsername)
-
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: appName
   location: location
   tags: tags
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${imagePullIdentityResourceId}': {}
+    }
+  }
   properties: {
     managedEnvironmentId: environmentId
     configuration: {
@@ -87,21 +79,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
-      // Only attach registry credentials when using admin creds. With a managed
-      // identity you would set `identity` here and omit the secret.
-      registries: useAdminCreds ? [
+      registries: [
         {
           server: registryLoginServer
-          username: registryUsername
-          passwordSecretRef: 'registry-password'
+          identity: imagePullIdentityResourceId
         }
-      ] : []
-      secrets: useAdminCreds ? [
-        {
-          name: 'registry-password'
-          value: registryPassword
-        }
-      ] : []
+      ]
       // TODO: Add application secrets here (DB connection strings, API keys, ...)
       //       and reference them from env via secretRef instead of value.
     }

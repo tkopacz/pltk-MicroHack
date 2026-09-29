@@ -1,17 +1,17 @@
 FROM node:24-alpine AS builder
 
 WORKDIR /app
-COPY ./package*.json ./
+COPY api-ts/package*.json ./
 RUN npm install
-COPY . .
+COPY api-ts/ .
 RUN npm run build
 
 FROM node:24-alpine
 WORKDIR /app
-COPY ./package*.json ./
+COPY api-ts/package*.json ./
 RUN npm install --omit=dev
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/database ./database
+COPY database /database
 
 EXPOSE 3000
 CMD ["npm", "start"]
